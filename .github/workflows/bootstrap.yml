@@ -21,7 +21,7 @@ jobs:
           test -f entry-offline-mobile-source.tar.gz
           tar -xzf entry-offline-mobile-source.tar.gz
           rm entry-offline-mobile-source.tar.gz
-          rm .github/workflows/bootstrap.yml
+          rm .github/workflows/build-apk.yml
 
       - name: Replace bootstrap files with the project
         run: |
