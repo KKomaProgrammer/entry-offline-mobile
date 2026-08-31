@@ -1,0 +1,32 @@
+name: Bootstrap repository
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bootstrap commit
+        uses: actions/checkout@v4
+
+      - name: Expand the source tree
+        run: |
+          test -f entry-offline-mobile-source.tar.gz
+          tar -xzf entry-offline-mobile-source.tar.gz
+          rm entry-offline-mobile-source.tar.gz
+          rm .github/workflows/bootstrap.yml
+
+      - name: Replace bootstrap files with the project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Build Entry Offline as an Android APK"
+          git push
