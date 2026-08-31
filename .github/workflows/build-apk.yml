@@ -1,0 +1,132 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: entrylabs/entry-offline branch, tag, or commit
+        required: true
+        default: b238f8aeddcd748c035d2d3b6580cc23616dfaf2
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out mobile builder
+        uses: actions/checkout@v4
+
+      - name: Check out Entry Offline
+        uses: actions/checkout@v4
+        with:
+          repository: entrylabs/entry-offline
+          ref: ${{ inputs.upstream_ref || 'b238f8aeddcd748c035d2d3b6580cc23616dfaf2' }}
+          path: .upstream
+          fetch-depth: 1
+
+      - name: Check out EntryJS prebuilt offline branch
+        uses: actions/checkout@v4
+        with:
+          repository: entrylabs/entryjs
+          ref: 92f57b3a9797a4919a410f3d6c99fa074d1388eb
+          path: .vendor/entry-js
+          fetch-depth: 1
+
+      - name: Check out Entry Tool prebuilt branch
+        uses: actions/checkout@v4
+        with:
+          repository: entrylabs/entry-tool
+          ref: 9a90d89b87671115a75472d7b1c0865c8bcc6351
+          path: .vendor/entry-tool
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Cache upstream npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-entry-offline-npm-${{ hashFiles('.upstream/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-entry-offline-npm-
+
+      - name: Install mobile build dependencies
+        run: npm ci
+
+      - name: Test Android compatibility bridge
+        run: npm test
+
+      - name: Install Entry Offline dependencies without native hardware scripts
+        working-directory: .upstream
+        run: npm install --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+
+      - name: Build and assemble the offline web app
+        run: npm run build:web -- .upstream .vendor/entry-js .vendor/entry-tool
+
+      - name: Verify assembled web app
+        run: node scripts/verify-dist.mjs
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Sync web app into Android
+        run: npm run android:sync
+
+      - name: Build installable debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Verify and name APK
+        run: |
+          mkdir -p artifacts
+          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/Entry-Offline-Mobile.apk
+          unzip -t artifacts/Entry-Offline-Mobile.apk
+          test "$(stat -c%s artifacts/Entry-Offline-Mobile.apk)" -gt 1000000
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Entry-Offline-Mobile-APK
+          path: artifacts/Entry-Offline-Mobile.apk
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish rolling APK release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view mobile-latest >/dev/null 2>&1; then
+            gh release upload mobile-latest artifacts/Entry-Offline-Mobile.apk --clobber
+          else
+            gh release create mobile-latest artifacts/Entry-Offline-Mobile.apk --title "Entry Offline Mobile 최신 APK" --notes "main 브랜치에서 자동 빌드한 설치용 APK입니다." --prerelease
+          fi
