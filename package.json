@@ -1,0 +1,27 @@
+{
+  "name": "entry-offline-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Android port and GitHub Actions APK builder for entrylabs/entry-offline",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build:bridge": "esbuild src/mobile-bridge.ts --bundle --minify --format=iife --target=es2020 --outfile=dist/mobile-bridge.js",
+    "build:web": "node scripts/build-web.mjs",
+    "android:sync": "node scripts/sync-android-assets.mjs",
+    "android:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
+    "test": "npm run build:bridge && node scripts/verify-bridge.mjs && tsc --noEmit"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.0",
+    "@capacitor/core": "8.5.0",
+    "fflate": "0.8.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.0",
+    "esbuild": "0.25.9",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

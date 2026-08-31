@@ -1,0 +1,9 @@
+{
+  "appId": "io.github.kkomaprogrammer.entryofflinemobile",
+  "appName": "Entry Offline",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#e5e5e5"
+  }
+}

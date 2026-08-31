@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.upstream/
+.vendor/
+.gradle/
+android/.gradle/
+android/local.properties
+android/app/build/
+artifacts/
+*.apk
+*.aab
