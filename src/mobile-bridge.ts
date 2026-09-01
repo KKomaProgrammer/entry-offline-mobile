@@ -12,6 +12,22 @@ type EntryFileApi = {
 const win = window as any;
 const EntryFile = registerPlugin<EntryFileApi>('EntryFile');
 const tables = new Map<string, any>();
+let activeProjectUrls = new Set<string>();
+
+function createProjectObjectUrl(blob: Blob, owner = activeProjectUrls) {
+  const url = URL.createObjectURL(blob);
+  owner.add(url);
+  return url;
+}
+
+function releaseObjectUrls(urls: Set<string>) {
+  for (const url of urls) URL.revokeObjectURL(url);
+  urls.clear();
+}
+
+function releaseProjectResources() {
+  releaseObjectUrls(activeProjectUrls);
+}
 
 function randomId() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -95,7 +111,10 @@ function parseTar(data: Uint8Array) {
     const prefix = readString(header, 345, 155);
     const shortName = readString(header, 0, 100);
     const name = pax.path || longName || (prefix ? `${prefix}/${shortName}` : shortName);
-    const body = data.slice(offset + 512, offset + 512 + size);
+    // Keep a view into the TAR buffer instead of copying every resource. Large
+    // projects can contain thousands of images, so per-entry copies cause a
+    // considerable temporary memory spike in Android WebView.
+    const body = data.subarray(offset + 512, offset + 512 + size);
     if (type === 'L') longName = readString(body, 0, body.length);
     else if (type === 'x' || type === 'g') pax = { ...pax, ...parsePax(body) };
     else if (type === '0' || type === '\0') {
@@ -133,8 +152,14 @@ function urlForBundledResource(value: string) {
 async function imageSize(url: string) {
   return new Promise<{ width: number; height: number }>((resolve) => {
     const image = new Image();
-    image.onload = () => resolve({ width: image.naturalWidth || 960, height: image.naturalHeight || 540 });
-    image.onerror = () => resolve({ width: 960, height: 540 });
+    const finish = (size: { width: number; height: number }) => {
+      image.onload = null;
+      image.onerror = null;
+      image.src = '';
+      resolve(size);
+    };
+    image.onload = () => finish({ width: image.naturalWidth || 960, height: image.naturalHeight || 540 });
+    image.onerror = () => finish({ width: 960, height: 540 });
     image.src = url;
   });
 }
@@ -142,15 +167,21 @@ async function imageSize(url: string) {
 async function soundDuration(url: string) {
   return new Promise<number>((resolve) => {
     const audio = new Audio();
-    audio.onloadedmetadata = () => resolve(Math.round((audio.duration || 0) * 10) / 10);
-    audio.onerror = () => resolve(0);
+    const finish = (duration: number) => {
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.src = '';
+      resolve(duration);
+    };
+    audio.onloadedmetadata = () => finish(Math.round((audio.duration || 0) * 10) / 10);
+    audio.onerror = () => finish(0);
     audio.src = url;
   });
 }
 
 async function importPicture(file: File) {
   const id = randomId();
-  const url = URL.createObjectURL(file);
+  const url = createProjectObjectUrl(file);
   const ext = extensionFrom(file, '.png');
   return {
     _id: randomId(), id: randomId(), type: 'user', name: baseName(file.name), filename: id,
@@ -161,7 +192,7 @@ async function importPicture(file: File) {
 
 async function importSound(file: File) {
   const id = randomId();
-  const url = URL.createObjectURL(file);
+  const url = createProjectObjectUrl(file);
   const ext = extensionFrom(file, '.mp3');
   return {
     _id: randomId(), type: 'user', name: baseName(file.name), filename: id,
@@ -173,25 +204,71 @@ function normalizeFiles(values: unknown[]) {
   return values.filter((value): value is File => value instanceof File);
 }
 
-function locateArchiveFile(files: Map<string, Uint8Array>, resource: any, kind: 'image' | 'sound') {
+async function mapWithConcurrency<T, R>(values: T[], concurrency: number, mapper: (value: T) => Promise<R>) {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(values[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+type ArchiveResource = readonly [string, Uint8Array];
+
+function indexArchiveFiles(files: Map<string, Uint8Array>) {
+  const index = new Map<string, ArchiveResource>();
+  for (const [name, bytes] of files) {
+    const kind = name.includes('/image/') ? 'image' : name.includes('/sound/') ? 'sound' : undefined;
+    if (!kind) continue;
+    const leaf = name.split('/').pop() || '';
+    const stem = leaf.replace(/\.[^.]+$/, '');
+    index.set(`${kind}:${leaf}`, [name, bytes]);
+    index.set(`${kind}:${stem}`, [name, bytes]);
+  }
+  return index;
+}
+
+function locateArchiveFile(
+  files: Map<string, Uint8Array>,
+  index: Map<string, ArchiveResource>,
+  resource: any,
+  kind: 'image' | 'sound'
+) {
   const fileurl = String(resource.fileurl || '').replace(/^(\.\.\/)+/, '').replace(/^\//, '');
   if (files.has(fileurl)) return [fileurl, files.get(fileurl)!] as const;
   const filename = String(resource.filename || '');
-  for (const [name, bytes] of files) {
-    const leaf = name.split('/').pop() || '';
-    if (filename && (leaf === filename || leaf.startsWith(`${filename}.`)) && name.includes(kind)) return [name, bytes] as const;
-  }
+  if (filename) return index.get(`${kind}:${filename}`);
 }
 
-function hydrateProject(project: any, files: Map<string, Uint8Array>) {
+function resourceMime(extension: string, kind: 'image' | 'sound') {
+  const ext = extension.toLowerCase().replace(/^\./, '');
+  if (kind === 'image') {
+    return ({ svg: 'image/svg+xml', jpg: 'image/jpeg', jpeg: 'image/jpeg' } as Record<string, string>)[ext] || `image/${ext}`;
+  }
+  return ({ mp3: 'audio/mpeg', m4a: 'audio/mp4' } as Record<string, string>)[ext] || `audio/${ext}`;
+}
+
+function hydrateProject(project: any, files: Map<string, Uint8Array>, owner = activeProjectUrls) {
+  const archiveUrls = new Map<string, string>();
+  const archiveIndex = indexArchiveFiles(files);
   for (const object of project.objects || []) {
     for (const [kind, resources] of [['image', object.sprite?.pictures || []], ['sound', object.sprite?.sounds || []]] as const) {
       for (const resource of resources as any[]) {
-        const found = locateArchiveFile(files, resource, kind);
+        const found = locateArchiveFile(files, archiveIndex, resource, kind);
         if (found) {
           const ext = found[0].match(/\.[^.]+$/)?.[0] || (kind === 'image' ? '.png' : '.mp3');
-          const mime = kind === 'image' ? `image/${ext.slice(1).replace('jpg', 'jpeg')}` : `audio/${ext.slice(1)}`;
-          resource.fileurl = URL.createObjectURL(new Blob([asArrayBuffer(found[1])], { type: mime }));
+          const mime = resourceMime(ext, kind);
+          let resourceUrl = archiveUrls.get(found[0]);
+          if (!resourceUrl) {
+            resourceUrl = createProjectObjectUrl(new Blob([asArrayBuffer(found[1])], { type: mime }), owner);
+            archiveUrls.set(found[0], resourceUrl);
+          }
+          resource.fileurl = resourceUrl;
           if (kind === 'sound') resource.path = resource.fileurl;
         } else if (resource.fileurl) resource.fileurl = urlForBundledResource(resource.fileurl);
       }
@@ -207,7 +284,16 @@ async function loadProject(source: File | string) {
   if (!projectFile) throw new Error('project.json이 없는 .ent 파일입니다.');
   const project = JSON.parse(strFromU8(projectFile[1]));
   project.savedPath = source.name;
-  return hydrateProject(project, archive);
+  const nextProjectUrls = new Set<string>();
+  try {
+    const hydratedProject = hydrateProject(project, archive, nextProjectUrls);
+    releaseProjectResources();
+    activeProjectUrls = nextProjectUrls;
+    return hydratedProject;
+  } catch (error) {
+    releaseObjectUrls(nextProjectUrls);
+    throw error;
+  }
 }
 
 async function projectArchive(projectInput: any) {
@@ -325,11 +411,11 @@ async function invoke(channel: string, ...args: any[]): Promise<any> {
   switch (channel) {
     case 'loadProject': return loadProject(args[0]);
     case 'saveProject': return saveProject(args[0], args[1]);
-    case 'resetDirectory': return undefined;
+    case 'resetDirectory': releaseProjectResources(); return undefined;
     case 'isValidAsarFile': return true;
     case 'checkUpdate': return ['2.1.35', { hasNewVersion: false, recentVersion: '2.1.35' }];
-    case 'importPictures': return Promise.all(normalizeFiles(args[0] || []).map(importPicture));
-    case 'importSounds': return Promise.all(normalizeFiles(args[0] || []).map(importSound));
+    case 'importPictures': return mapWithConcurrency(normalizeFiles(args[0] || []), 6, importPicture);
+    case 'importSounds': return mapWithConcurrency(normalizeFiles(args[0] || []), 4, importSound);
     case 'importPicturesFromResource': return (args[0] || []).map((item: any) => ({ ...item, fileurl: urlForBundledResource(item.fileurl || `renderer/resources/uploads/${item.filename.slice(0, 2)}/${item.filename.slice(2, 4)}/image/${item.filename}${item.ext || '.png'}`) }));
     case 'importSoundsFromResource': return (args[0] || []).map((item: any) => ({ ...item, fileurl: urlForBundledResource(item.fileurl || `renderer/resources/uploads/${item.filename.slice(0, 2)}/${item.filename.slice(2, 4)}/sound/${item.filename}${item.ext || '.mp3'}`), path: urlForBundledResource(item.fileurl || '') }));
     case 'getExistSoundFilePath': return urlForBundledResource(args[0]?.fileurl || `renderer/resources/uploads/${args[0]?.filename?.slice(0, 2)}/${args[0]?.filename?.slice(2, 4)}/sound/${args[0]?.filename}${args[0]?.ext || '.mp3'}`);
@@ -341,7 +427,7 @@ async function invoke(channel: string, ...args: any[]): Promise<any> {
     case 'saveSoundBuffer': {
       const filename = randomId();
       const blob = new Blob([args[0]], { type: 'audio/wav' });
-      const filePath = URL.createObjectURL(blob);
+      const filePath = createProjectObjectUrl(blob);
       return { duration: await soundDuration(filePath), filename, filePath };
     }
     case 'createTableInfo': {
@@ -379,6 +465,7 @@ const dialog = {
 win.dialog = dialog;
 win.isOsx = false;
 win.isOffline = true;
+win.isMobileApp = true;
 win.ipcInvoke = invoke;
 win.ipcSend = () => undefined;
 win.ipcListen = () => ({ on: () => undefined });
@@ -387,7 +474,8 @@ win.onPageLoaded = (callback: () => void) => {
   else setTimeout(callback);
 };
 win.onLoadProjectFromMain = () => undefined;
-win.getSharedObject = () => ({ version: '2.1.35', roomIds: [], file: undefined });
+const sharedObject = { version: '2.1.35', roomIds: [] as string[], file: undefined as File | string | undefined };
+win.getSharedObject = () => sharedObject;
 win.initNativeMenu = () => undefined;
 win.getLang = (key: string) => key.split('.').reduce((value: any, part) => value?.[part], win.Lang) || key;
 win.openEntryWebPage = () => win.open('https://playentry.org/download/offline', '_blank');
@@ -400,6 +488,7 @@ win.getPapagoHeaderInfo = async () => ({});
 win.weightsPath = () => '/entry-js/weights';
 win.getEntryjsPath = () => '/entry-js';
 win.getAppPathWithParams = (...parts: string[]) => `/${parts.join('/')}`;
-win.__ENTRY_MOBILE_TEST__ = { makeTar, parseTar, ungzipIfNeeded };
+win.releaseEntryMobileProjectResources = releaseProjectResources;
+win.__ENTRY_MOBILE_TEST__ = { makeTar, parseTar, ungzipIfNeeded, hydrateProject, releaseObjectUrls, resourceMime };
 
 console.info('[Entry Mobile] Android browser bridge ready');

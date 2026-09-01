@@ -67,6 +67,16 @@ await replace(
   "        console.info('[Entry Mobile] Hardware connection is disabled.');"
 );
 await replace(
+  path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryPatcher.ts'),
+  "            if (imageType === 'svg') {\n                return fileurl.replace(/\\..{3,4}$/, `.${imageType}`);\n            }",
+  "            if (imageType === 'svg' && !/^(blob:|data:)/.test(fileurl)) {\n                return fileurl.replace(/\\..{3,4}$/, `.${imageType}`);\n            }"
+);
+await replace(
+  path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryUtils.ts'),
+  "        const project = StorageManager.loadProject();",
+  "        let project = StorageManager.loadProject();\n        if ((window as any).isMobileApp && project && JSON.stringify(project).includes('blob:')) {\n            // Object URLs expire when Android WebView restarts. Restoring such a\n            // snapshot produces an empty stage instead of the default project.\n            StorageManager.clearSavedProject();\n            project = undefined;\n        }"
+);
+await replace(
   path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryModalHelper.ts'),
   "imageBaseUrl: string = '../../../node_modules/entry-js/images/hardware/'",
   "imageBaseUrl: string = '/entry-js/images/hardware/'"
@@ -101,6 +111,42 @@ constants = constants
   .replace(/`\$\{this\.resourcePath\}/g, '`/${this.resourcePath}')
   .replace(/`temp\$\{this\.sep\}/g, '`/temp${this.sep}');
 await writeFile(constantsFile, constants);
+
+// EntryJS starts every project image request at once and does not decrement its
+// global loading counter when an in-flight image is destroyed. On Android this
+// can exhaust WebView resources and leave a later "new project" permanently
+// waiting for images that belonged to the previous project.
+const entryBundle = path.join(entryJs, 'dist', 'entry.js');
+await replace(
+  entryBundle,
+  "    function AtlasImageLoader(_onLoadCallback) {\n        this._onLoadCallback = _onLoadCallback;\n        this._path_info_map = {};\n        this._timer = new TimeoutTimer/* TimeoutTimer */.p();\n    }",
+  "    function AtlasImageLoader(_onLoadCallback) {\n        this._onLoadCallback = _onLoadCallback;\n        this._path_info_map = {};\n        this._pendingInfo = [];\n        this._activeCount = 0;\n        this._maxConcurrent = 8;\n        this._timer = new TimeoutTimer/* TimeoutTimer */.p();\n    }"
+);
+await replace(
+  entryBundle,
+  "        info = new AtlasImageLoadingInfo(model, imgRect, this._onLoadCallback);\n        this._path_info_map[path] = info;\n        info.load();\n    };\n    AtlasImageLoader.prototype.getImageInfo",
+  "        var _this = this;\n        info = new AtlasImageLoadingInfo(model, imgRect, function(loadedInfo) {\n            _this._activeCount = Math.max(0, _this._activeCount - 1);\n            _this._onLoadCallback(loadedInfo);\n            _this._drain();\n        });\n        this._path_info_map[path] = info;\n        this._pendingInfo.push(info);\n        this._drain();\n    };\n    AtlasImageLoader.prototype._drain = function () {\n        while (this._activeCount < this._maxConcurrent && this._pendingInfo.length) {\n            var info = this._pendingInfo.shift();\n            if (info.loadState != LoadingState.NONE) {\n                continue;\n            }\n            this._activeCount++;\n            info.load();\n        }\n    };\n    AtlasImageLoader.prototype.getImageInfo"
+);
+await replace(
+  entryBundle,
+  "    AtlasImageLoadingInfo.prototype.destroy = function () {\n        this.loadState = LoadingState.DESTROYED;",
+  "    AtlasImageLoadingInfo.prototype.destroy = function () {\n        if (this.loadState == LoadingState.LOADING) {\n            Entry.Loader.removeQueue();\n        }\n        this.loadState = LoadingState.DESTROYED;"
+);
+await replace(
+  entryBundle,
+  "            info.destroy();\n            deleteCnt++;\n            delete _this._path_info_map[path];",
+  "            if (info.loadState == LoadingState.LOADING) {\n                _this._activeCount = Math.max(0, _this._activeCount - 1);\n            }\n            info.destroy();\n            deleteCnt++;\n            delete _this._path_info_map[path];"
+);
+await replace(
+  entryBundle,
+  "        if (deleteCnt > 0) {\n            (0,logs/* clog */.y)(\"\".concat(deleteCnt, \" image item(s) deleted\"));\n        }\n    };\n    /**\n     * 로드/케시된 모든 정보를 지움.",
+  "        if (deleteCnt > 0) {\n            (0,logs/* clog */.y)(\"\".concat(deleteCnt, \" image item(s) deleted\"));\n            this._drain();\n        }\n    };\n    /**\n     * 로드/케시된 모든 정보를 지움."
+);
+await replace(
+  entryBundle,
+  "        this._path_info_map = {};\n    };\n    AtlasImageLoader.prototype.requestSync",
+  "        this._path_info_map = {};\n        this._pendingInfo = [];\n        this._activeCount = 0;\n    };\n    AtlasImageLoader.prototype.requestSync"
+);
 
 await run(
   path.join(upstream, 'node_modules', '.bin', 'webpack'),
