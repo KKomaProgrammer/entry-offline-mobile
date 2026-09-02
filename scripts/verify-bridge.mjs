@@ -35,4 +35,23 @@ if (ownedUrls.size !== 0) throw new Error('Project object URLs were not released
 if (test.resourceMime('.svg', 'image') !== 'image/svg+xml') throw new Error('SVG MIME type is invalid');
 if (test.resourceMime('.mp3', 'sound') !== 'audio/mpeg') throw new Error('MP3 MIME type is invalid');
 
+const validProject = { scenes: [{ id: 'scene' }], objects: [{ id: 'object' }] };
+if (!test.isRestorableProject(validProject)) throw new Error('Valid project was rejected');
+if (test.isRestorableProject({ scenes: [], objects: [] })) throw new Error('Empty project was accepted');
+if (test.isRestorableProject({ ...validProject, objects: [{ fileurl: 'blob:expired' }] })) {
+  throw new Error('Expired project URL was accepted');
+}
+
+const [resourceObject] = test.importObjectsFromResource([{
+  name: 'Entrybot',
+  pictures: [{ filename: 'aabbcc', imageType: 'svg' }],
+  sounds: [{ filename: 'ddeeff', ext: '.mp3' }]
+}]);
+if (resourceObject.pictures[0].fileurl !== '/renderer/resources/uploads/aa/bb/image/aabbcc.png') {
+  throw new Error('Bundled object picture path is invalid');
+}
+if (resourceObject.sounds[0].fileurl !== '/renderer/resources/uploads/dd/ee/sound/ddeeff.mp3') {
+  throw new Error('Bundled object sound path is invalid');
+}
+
 console.log('Mobile bridge TAR and resource lifecycle verification passed.');
