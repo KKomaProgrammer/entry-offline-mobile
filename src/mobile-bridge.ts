@@ -26,7 +26,14 @@ function releaseObjectUrls(urls: Set<string>) {
 }
 
 function releaseProjectResources() {
-  releaseObjectUrls(activeProjectUrls);
+  const previousProjectUrls = activeProjectUrls;
+  activeProjectUrls = new Set<string>();
+  if (previousProjectUrls.size) {
+    // Give EntryJS time to dispose the old project before revoking its URLs.
+    // Revoking them while the old image loader is still active can leave the
+    // next project waiting forever.
+    setTimeout(() => releaseObjectUrls(previousProjectUrls), 1000);
+  }
 }
 
 function randomId() {
@@ -149,6 +156,16 @@ function urlForBundledResource(value: string) {
   return `/${value.replace(/^(\.\.\/)+/, '').replace(/^src\//, '')}`;
 }
 
+function isRestorableProject(project: any) {
+  if (!project || !Array.isArray(project.objects) || project.objects.length === 0) return false;
+  if (!Array.isArray(project.scenes) || project.scenes.length === 0) return false;
+  try {
+    return !JSON.stringify(project).includes('blob:');
+  } catch {
+    return false;
+  }
+}
+
 async function imageSize(url: string) {
   return new Promise<{ width: number; height: number }>((resolve) => {
     const image = new Image();
@@ -198,6 +215,32 @@ async function importSound(file: File) {
     _id: randomId(), type: 'user', name: baseName(file.name), filename: id,
     ext, fileurl: url, path: url, duration: await soundDuration(url)
   };
+}
+
+function importPictureFromResource(picture: any) {
+  const filename = String(picture?.filename || '');
+  const fallback = filename
+    ? `renderer/resources/uploads/${filename.slice(0, 2)}/${filename.slice(2, 4)}/image/${filename}${picture?.ext || '.png'}`
+    : '';
+  const fileurl = urlForBundledResource(picture?.fileurl || fallback);
+  return { ...picture, fileurl, thumbUrl: urlForBundledResource(picture?.thumbUrl || fileurl) };
+}
+
+function importSoundFromResource(sound: any) {
+  const filename = String(sound?.filename || '');
+  const fallback = filename
+    ? `renderer/resources/uploads/${filename.slice(0, 2)}/${filename.slice(2, 4)}/sound/${filename}${sound?.ext || '.mp3'}`
+    : '';
+  const fileurl = urlForBundledResource(sound?.fileurl || fallback);
+  return { ...sound, fileurl, path: fileurl };
+}
+
+function importObjectsFromResource(objects: any[]) {
+  return objects.map((object) => ({
+    ...object,
+    pictures: (object?.pictures || []).map(importPictureFromResource),
+    sounds: (object?.sounds || []).map(importSoundFromResource)
+  }));
 }
 
 function normalizeFiles(values: unknown[]) {
@@ -416,8 +459,9 @@ async function invoke(channel: string, ...args: any[]): Promise<any> {
     case 'checkUpdate': return ['2.1.35', { hasNewVersion: false, recentVersion: '2.1.35' }];
     case 'importPictures': return mapWithConcurrency(normalizeFiles(args[0] || []), 6, importPicture);
     case 'importSounds': return mapWithConcurrency(normalizeFiles(args[0] || []), 4, importSound);
-    case 'importPicturesFromResource': return (args[0] || []).map((item: any) => ({ ...item, fileurl: urlForBundledResource(item.fileurl || `renderer/resources/uploads/${item.filename.slice(0, 2)}/${item.filename.slice(2, 4)}/image/${item.filename}${item.ext || '.png'}`) }));
-    case 'importSoundsFromResource': return (args[0] || []).map((item: any) => ({ ...item, fileurl: urlForBundledResource(item.fileurl || `renderer/resources/uploads/${item.filename.slice(0, 2)}/${item.filename.slice(2, 4)}/sound/${item.filename}${item.ext || '.mp3'}`), path: urlForBundledResource(item.fileurl || '') }));
+    case 'importObjectsFromResource': return importObjectsFromResource(args[0] || []);
+    case 'importPicturesFromResource': return (args[0] || []).map(importPictureFromResource);
+    case 'importSoundsFromResource': return (args[0] || []).map(importSoundFromResource);
     case 'getExistSoundFilePath': return urlForBundledResource(args[0]?.fileurl || `renderer/resources/uploads/${args[0]?.filename?.slice(0, 2)}/${args[0]?.filename?.slice(2, 4)}/sound/${args[0]?.filename}${args[0]?.ext || '.mp3'}`);
     case 'importPictureFromCanvas': {
       const image = args[0]?.image;
@@ -489,6 +533,10 @@ win.weightsPath = () => '/entry-js/weights';
 win.getEntryjsPath = () => '/entry-js';
 win.getAppPathWithParams = (...parts: string[]) => `/${parts.join('/')}`;
 win.releaseEntryMobileProjectResources = releaseProjectResources;
-win.__ENTRY_MOBILE_TEST__ = { makeTar, parseTar, ungzipIfNeeded, hydrateProject, releaseObjectUrls, resourceMime };
+win.isRestorableEntryMobileProject = isRestorableProject;
+win.__ENTRY_MOBILE_TEST__ = {
+  makeTar, parseTar, ungzipIfNeeded, hydrateProject, releaseObjectUrls, resourceMime,
+  isRestorableProject, importObjectsFromResource
+};
 
 console.info('[Entry Mobile] Android browser bridge ready');
