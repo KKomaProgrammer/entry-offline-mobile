@@ -74,7 +74,17 @@ await replace(
 await replace(
   path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryUtils.ts'),
   "        const project = StorageManager.loadProject();",
-  "        let project = StorageManager.loadProject();\n        if ((window as any).isMobileApp && project && JSON.stringify(project).includes('blob:')) {\n            // Object URLs expire when Android WebView restarts. Restoring such a\n            // snapshot produces an empty stage instead of the default project.\n            StorageManager.clearSavedProject();\n            project = undefined;\n        }"
+  "        let project = StorageManager.loadProject();\n        if (\n            (window as any).isMobileApp &&\n            project &&\n            !(window as any).isRestorableEntryMobileProject(project)\n        ) {\n            StorageManager.clearSavedProject();\n            project = undefined;\n        }"
+);
+await replace(
+  path.join(upstream, 'src', 'renderer', 'components', 'workspace.tsx'),
+  "                await RendererUtils.clearTempProject();\n                await this.loadProject();",
+  "                await RendererUtils.clearTempProject();\n                const project = (window as any).isMobileApp\n                    ? Entry.getStartProject(Entry.mediaFilePath)\n                    : undefined;\n                await this.loadProject(project);\n                if ((window as any).isMobileApp) {\n                    this.handleStorageProjectSave();\n                }"
+);
+await replace(
+  path.join(upstream, 'src', 'renderer', 'components', 'workspace.tsx'),
+  "        const { CommonActions, PersistActions, persist } = this.props;\n        const { mode: currentWorkspaceMode } = persist;",
+  "        const { CommonActions, PersistActions, persist } = this.props;\n        if (\n            (window as any).isMobileApp &&\n            !(window as any).isRestorableEntryMobileProject(project)\n        ) {\n            project = Entry.getStartProject(Entry.mediaFilePath);\n        }\n        const { mode: currentWorkspaceMode } = persist;"
 );
 await replace(
   path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryModalHelper.ts'),
