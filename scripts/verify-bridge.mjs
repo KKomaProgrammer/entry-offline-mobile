@@ -35,11 +35,32 @@ if (ownedUrls.size !== 0) throw new Error('Project object URLs were not released
 if (test.resourceMime('.svg', 'image') !== 'image/svg+xml') throw new Error('SVG MIME type is invalid');
 if (test.resourceMime('.mp3', 'sound') !== 'audio/mpeg') throw new Error('MP3 MIME type is invalid');
 
+const firstLoadedProject = {};
+const firstLoadedUrls = new Set(['blob:first-project']);
+test.stageProjectResources(firstLoadedProject, firstLoadedUrls);
+test.activateProjectResources(firstLoadedProject);
+if (firstLoadedUrls.size !== 1) throw new Error('New project resources were released too early');
+const secondLoadedProject = {};
+const secondLoadedUrls = new Set(['blob:second-project']);
+test.stageProjectResources(secondLoadedProject, secondLoadedUrls);
+test.activateProjectResources(secondLoadedProject);
+if (firstLoadedUrls.size !== 0 || secondLoadedUrls.size !== 1) {
+  throw new Error('Project resources were not swapped after activation');
+}
+test.activateProjectResources(undefined);
+if (secondLoadedUrls.size !== 0) throw new Error('New workspace did not release old project resources');
+
 const validProject = { scenes: [{ id: 'scene' }], objects: [{ id: 'object' }] };
 if (!test.isRestorableProject(validProject)) throw new Error('Valid project was rejected');
 if (test.isRestorableProject({ scenes: [], objects: [] })) throw new Error('Empty project was accepted');
 if (test.isRestorableProject({ ...validProject, objects: [{ fileurl: 'blob:expired' }] })) {
   throw new Error('Expired project URL was accepted');
+}
+if (test.isRestorableProject({
+  ...validProject,
+  objects: [{ sprite: { pictures: [{ fileurl: 'undefinedmedia/entrybot1.svg' }] } }]
+})) {
+  throw new Error('Broken pre-init default project was accepted');
 }
 
 const [resourceObject] = test.importObjectsFromResource([{
@@ -52,6 +73,17 @@ if (resourceObject.pictures[0].fileurl !== '/renderer/resources/uploads/aa/bb/im
 }
 if (resourceObject.sounds[0].fileurl !== '/renderer/resources/uploads/dd/ee/sound/ddeeff.mp3') {
   throw new Error('Bundled object sound path is invalid');
+}
+
+const buildScript = await readFile(new URL('./build-web.mjs', import.meta.url), 'utf8');
+if (buildScript.includes('getStartProject(Entry.mediaFilePath)')) {
+  throw new Error('Default project is still created before Entry.init');
+}
+if (!buildScript.includes('activateEntryMobileProjectResources?.(project)')) {
+  throw new Error('Workspace resource activation patch is missing');
+}
+if (!buildScript.includes("libDir: ''")) {
+  throw new Error('EntryJS media resources are not rooted at the app origin');
 }
 
 console.log('Mobile bridge TAR and resource lifecycle verification passed.');
