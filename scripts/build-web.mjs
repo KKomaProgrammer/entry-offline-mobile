@@ -59,7 +59,7 @@ await replace(
 await replace(
   path.join(upstream, 'src', 'renderer', 'components', 'workspace.tsx'),
   "libDir: '../../../node_modules',\n        defaultDir: '../../renderer/resources',",
-  "libDir: '.',\n        defaultDir: '/renderer/resources',"
+  "libDir: '',\n        defaultDir: '/renderer/resources',"
 );
 await replace(
   path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryPatcher.ts'),
@@ -78,13 +78,8 @@ await replace(
 );
 await replace(
   path.join(upstream, 'src', 'renderer', 'components', 'workspace.tsx'),
-  "                await RendererUtils.clearTempProject();\n                await this.loadProject();",
-  "                await RendererUtils.clearTempProject();\n                const project = (window as any).isMobileApp\n                    ? (Entry as any).getStartProject(Entry.mediaFilePath)\n                    : undefined;\n                await this.loadProject(project);\n                if ((window as any).isMobileApp) {\n                    this.handleStorageProjectSave();\n                }"
-);
-await replace(
-  path.join(upstream, 'src', 'renderer', 'components', 'workspace.tsx'),
-  "        const { CommonActions, PersistActions, persist } = this.props;\n        const { mode: currentWorkspaceMode } = persist;",
-  "        const { CommonActions, PersistActions, persist } = this.props;\n        if (\n            (window as any).isMobileApp &&\n            !(window as any).isRestorableEntryMobileProject(project)\n        ) {\n            project = (Entry as any).getStartProject(Entry.mediaFilePath);\n        }\n        const { mode: currentWorkspaceMode } = persist;"
+  "        }\n        Entry.reloadBlock();",
+  "        }\n        // The Android bridge revokes the previous .ent object URLs only after\n        // Entry has disposed the old project. Revoking them from resetDirectory\n        // or the file parser can crash WebView while EntryJS still uses them.\n        (window as any).activateEntryMobileProjectResources?.(project);\n        Entry.reloadBlock();"
 );
 await replace(
   path.join(upstream, 'src', 'renderer', 'helper', 'entry', 'entryModalHelper.ts'),
