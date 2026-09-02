@@ -13,6 +13,8 @@ const win = window as any;
 const EntryFile = registerPlugin<EntryFileApi>('EntryFile');
 const tables = new Map<string, any>();
 let activeProjectUrls = new Set<string>();
+let stagedProject: any;
+let stagedProjectUrls = new Set<string>();
 
 function createProjectObjectUrl(blob: Blob, owner = activeProjectUrls) {
   const url = URL.createObjectURL(blob);
@@ -26,13 +28,29 @@ function releaseObjectUrls(urls: Set<string>) {
 }
 
 function releaseProjectResources() {
-  const previousProjectUrls = activeProjectUrls;
+  const previousUrls = activeProjectUrls;
   activeProjectUrls = new Set<string>();
-  if (previousProjectUrls.size) {
-    // Give EntryJS time to dispose the old project before revoking its URLs.
-    // Revoking them while the old image loader is still active can leave the
-    // next project waiting forever.
-    setTimeout(() => releaseObjectUrls(previousProjectUrls), 1000);
+  releaseObjectUrls(previousUrls);
+  releaseObjectUrls(stagedProjectUrls);
+  stagedProject = undefined;
+  stagedProjectUrls = new Set<string>();
+}
+
+function stageProjectResources(project: any, urls: Set<string>) {
+  releaseObjectUrls(stagedProjectUrls);
+  stagedProject = project;
+  stagedProjectUrls = urls;
+}
+
+function activateProjectResources(project?: any) {
+  if (project === stagedProject) {
+    const previousUrls = activeProjectUrls;
+    activeProjectUrls = stagedProjectUrls;
+    stagedProject = undefined;
+    stagedProjectUrls = new Set<string>();
+    releaseObjectUrls(previousUrls);
+  } else if (!project) {
+    releaseProjectResources();
   }
 }
 
@@ -160,7 +178,10 @@ function isRestorableProject(project: any) {
   if (!project || !Array.isArray(project.objects) || project.objects.length === 0) return false;
   if (!Array.isArray(project.scenes) || project.scenes.length === 0) return false;
   try {
-    return !JSON.stringify(project).includes('blob:');
+    const serialized = JSON.stringify(project);
+    return !serialized.includes('blob:') &&
+      !serialized.includes('undefinedmedia/') &&
+      !serialized.includes('nullmedia/');
   } catch {
     return false;
   }
@@ -330,8 +351,9 @@ async function loadProject(source: File | string) {
   const nextProjectUrls = new Set<string>();
   try {
     const hydratedProject = hydrateProject(project, archive, nextProjectUrls);
-    releaseProjectResources();
-    activeProjectUrls = nextProjectUrls;
+    // Workspace activates this set after EntryJS has disposed the old project.
+    // Until then both the old and the newly parsed .ent resources must remain valid.
+    stageProjectResources(hydratedProject, nextProjectUrls);
     return hydratedProject;
   } catch (error) {
     releaseObjectUrls(nextProjectUrls);
@@ -454,7 +476,9 @@ async function invoke(channel: string, ...args: any[]): Promise<any> {
   switch (channel) {
     case 'loadProject': return loadProject(args[0]);
     case 'saveProject': return saveProject(args[0], args[1]);
-    case 'resetDirectory': releaseProjectResources(); return undefined;
+    // Workspace performs resource cleanup at the safe point after EntryJS has
+    // disposed its current image loader.
+    case 'resetDirectory': return undefined;
     case 'isValidAsarFile': return true;
     case 'checkUpdate': return ['2.1.35', { hasNewVersion: false, recentVersion: '2.1.35' }];
     case 'importPictures': return mapWithConcurrency(normalizeFiles(args[0] || []), 6, importPicture);
@@ -533,10 +557,11 @@ win.weightsPath = () => '/entry-js/weights';
 win.getEntryjsPath = () => '/entry-js';
 win.getAppPathWithParams = (...parts: string[]) => `/${parts.join('/')}`;
 win.releaseEntryMobileProjectResources = releaseProjectResources;
+win.activateEntryMobileProjectResources = activateProjectResources;
 win.isRestorableEntryMobileProject = isRestorableProject;
 win.__ENTRY_MOBILE_TEST__ = {
   makeTar, parseTar, ungzipIfNeeded, hydrateProject, releaseObjectUrls, resourceMime,
-  isRestorableProject, importObjectsFromResource
+  isRestorableProject, importObjectsFromResource, stageProjectResources, activateProjectResources
 };
 
 console.info('[Entry Mobile] Android browser bridge ready');
